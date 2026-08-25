@@ -11,35 +11,21 @@ import java.util.*;
  * Logic.java
  * ----------
  * Logica di elaborazione: lettura Excel e scrittura file di testo.
+ * Viene sempre elaborato il primo foglio del workbook, cioe quello
+ * visualizzato piu a sinistra in Excel.
  * Le colonne da estrarre sono passate come lista ordinata dall'esterno.
  */
 public class Logic {
 
-    // ── Trova il primo foglio che non finisce con "bkp" ──────────────────────
-
-    private static Sheet getFirstNonBkpSheet(Workbook wb) {
-        for (int i = 0; i < wb.getNumberOfSheets(); i++) {
-            String name = wb.getSheetName(i);
-            if (!name.toLowerCase().endsWith("bkp")) {
-                return wb.getSheetAt(i);
-            }
-        }
-        throw new IllegalArgumentException(
-                "Tutti i fogli hanno il suffisso 'bkp': nessun foglio utilizzabile."
-        );
-    }
-
-    // ── Legge una cella come stringa ─────────────────────────────────────────
-
+    // -- Legge una cella come stringa -----------------------------------------
     private static String cellStr(Cell cell) {
         if (cell == null) return "";
         DataFormatter fmt = new DataFormatter();
         return fmt.formatCellValue(cell).trim();
     }
 
-    // ── Elabora il file Excel e restituisce il testo formattato ──────────────
+    // -- Elabora il file Excel e restituisce il testo formattato --------------
     //    columns: lista ordinata dei nomi colonna da estrarre
-
     public static String processExcel(String path, List<String> columns) throws IOException {
         path = path.trim();
         File file = new File(path);
@@ -49,15 +35,16 @@ public class Logic {
                      ? new XSSFWorkbook(is)
                      : new HSSFWorkbook(is)) {
 
-            Sheet sheet = getFirstNonBkpSheet(wb);
+            // Il foglio con indice 0 e sempre il primo foglio sulla sinistra.
+            Sheet sheet = wb.getSheetAt(0);
 
             // Prima riga = intestazioni
             Row headerRow = sheet.getRow(0);
             if (headerRow == null) {
-                throw new IllegalArgumentException("Il foglio è vuoto.");
+                throw new IllegalArgumentException("Il foglio e vuoto.");
             }
 
-            // Mappa nome colonna → indice fisico
+            // Mappa nome colonna -> indice fisico
             Map<String, Integer> colIndex = new LinkedHashMap<>();
             for (int c = 0; c <= headerRow.getLastCellNum(); c++) {
                 Cell hCell = headerRow.getCell(c);
@@ -72,9 +59,10 @@ public class Logic {
             for (String col : columns) {
                 if (!colIndex.containsKey(col)) missing.add(col);
             }
+
             if (!missing.isEmpty()) {
                 throw new IllegalArgumentException(
-                        "Colonne mancanti nel foglio '" + sheet.getSheetName() + "': " + missing
+                        "Colonne mancanti nel primo foglio: " + missing
                 );
             }
 
@@ -116,8 +104,7 @@ public class Logic {
         }
     }
 
-    // ── Salva il file di output ───────────────────────────────────────────────
-
+    // -- Salva il file di output ---------------------------------------------
     public static String saveOutput(String excelPath, String content) throws IOException {
         String base = excelPath.replaceAll("\\.[^.]+$", "");
         File outFile = new File(base + "_output.txt");
@@ -132,7 +119,6 @@ public class Logic {
                 new FileOutputStream(outFile), "UTF-8")) {
             w.write(content);
         }
-
         return outFile.getAbsolutePath();
     }
 }
