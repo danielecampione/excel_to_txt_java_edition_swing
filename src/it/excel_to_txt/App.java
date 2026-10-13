@@ -2,351 +2,224 @@ package it.excel_to_txt;
 
 import javax.swing.*;
 import javax.swing.border.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import java.awt.*;
-import java.awt.datatransfer.*;
+import java.awt.datatransfer.DataFlavor;
 import java.awt.dnd.*;
 import java.awt.event.*;
 import java.io.File;
-import java.util.ArrayList;
+import java.util.*;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
-/**
- * App.java
- * --------
- * Interfaccia grafica Swing con supporto drag-and-drop.
- * Permette di specificare le colonne Excel da estrarre tramite textarea.
- *
- * HiDPI: tutti i valori pixel passano attraverso sc() / scf() che applicano
- * il fattore di scala calcolato dal DPI di sistema (96 dpi = scala 1.0×).
- */
+/** Interfaccia Swing completa con estrazione colonne e join Excel opzionale. */
 public class App extends JFrame {
-
-    // ── Supporto HiDPI ───────────────────────────────────────────────────────
-
-    /** Fattore di scala rispetto ai 96 dpi di riferimento. Es. 1.5 a 144 dpi. */
     private static final float SF;
-    static {
-        float screenDpi = Toolkit.getDefaultToolkit().getScreenResolution();
-        SF = Math.max(1.0f, screenDpi / 96.0f);
-    }
+    static { SF = Math.max(1.0f, Toolkit.getDefaultToolkit().getScreenResolution()/96.0f); }
+    private static int sc(int v){ return Math.round(v*SF); }
+    private static Font font(int style,int size){ return new Font("Segoe UI",style,sc(size)); }
+    private static final Color BG=new Color(0xF8FAFC), PANEL=new Color(0xF1F5F9), ACCENT=new Color(0x3B82F6),
+        ACCENT_DARK=new Color(0x1E40AF), FG=new Color(0x475569), SUCCESS=new Color(0x16A34A),
+        ERROR=new Color(0xDC2626), WARNING=new Color(0xD97706), BORDER=new Color(0xCBD5E1);
+    private static final String DEFAULT_COLUMNS="Numero\nDescrizione\nBreve descrizione";
+    private static final String DEFAULT_MAIN_KEYS="Richiesto per\nReparto\nUbicazione";
+    private static final String DEFAULT_SECONDARY_KEYS="Nome utente\nReparto\nUbicazione";
+    private static final int FORM_WIDTH=610, JOIN_INNER_WIDTH=568;
+    private static final String DEFAULT_JOIN_OUTPUT="Nome utente\nNumero dipendente\nTitolo\nReparto";
 
-    /** Converte pixel logici (96 dpi) in pixel fisici. */
-    private static int sc(int px) {
-        return Math.round(px * SF);
-    }
+    private JButton processBtn;
+    private JTextPane statusPane;
+    private JScrollPane statusScroll;
+    private JTextArea columnsArea,mainKeysArea,secondaryKeysArea,joinOutputArea;
+    private JCheckBox fallbackCheckBox;
+    private DropPanel mainDropPanel,secondaryDropPanel;
+    private String currentFile,secondaryFile;
 
-    /** Crea un Font con pt scalato al DPI corrente. */
-    private static Font scf(String name, int style, int ptLogical) {
-        return new Font(name, style, sc(ptLogical));
-    }
-
-    /** Applica rendering hint di qualità a un Graphics2D (anti-alias, LCD, ecc.). */
-    private static void applyHints(Graphics2D g2) {
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,      RenderingHints.VALUE_ANTIALIAS_ON);
-        g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
-        g2.setRenderingHint(RenderingHints.KEY_RENDERING,         RenderingHints.VALUE_RENDER_QUALITY);
-        g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL,    RenderingHints.VALUE_STROKE_PURE);
-        g2.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, RenderingHints.VALUE_FRACTIONALMETRICS_ON);
-    }
-
-    // ── Palette ──────────────────────────────────────────────────────────────
-    private static final Color BG          = new Color(0xF8FAFC);
-    private static final Color ACCENT      = new Color(0x3B82F6);
-    private static final Color ACCENT_DARK = new Color(0x1E40AF);
-    private static final Color FG_DIM      = new Color(0x475569);
-    private static final Color SUCCESS     = new Color(0x16A34A);
-    private static final Color ERROR       = new Color(0xDC2626);
-
-    // Colonne predefinite (stesso comportamento originale)
-    private static final String DEFAULT_COLUMNS = "Numero\nDescrizione\nBreve descrizione";
-
-    // ── Componenti ───────────────────────────────────────────────────────────
-    private final JPanel    dropPanel;
-    private final JButton   processBtn;
-    private final JLabel    statusLbl;
-    private final JTextArea columnsArea;
-
-    private String currentFile = null;
-
-    // ── Costruttore ──────────────────────────────────────────────────────────
-
-    public App() {
-        super("Excel → TXT");
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setResizable(false);
-        getContentPane().setBackground(BG);
-        setLayout(new BoxLayout(getContentPane(), BoxLayout.Y_AXIS));
-
-        // -- Titolo
-        JLabel title = new JLabel("Excel → TXT", SwingConstants.CENTER);
-        title.setFont(scf("Segoe UI", Font.BOLD, 20));
-        title.setForeground(ACCENT_DARK);
-        title.setAlignmentX(Component.CENTER_ALIGNMENT);
-        title.setBorder(new EmptyBorder(sc(20), sc(24), sc(10), sc(24)));
-        add(title);
-
-        // -- Drop panel
-        dropPanel = buildDropPanel();
-        JPanel dropWrapper = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
-        dropWrapper.setBackground(BG);
-        dropWrapper.setBorder(new EmptyBorder(0, sc(24), sc(8), sc(24)));
-        dropWrapper.add(dropPanel);
-        add(dropWrapper);
-
-        // -- Sezione colonne
-        columnsArea = buildColumnsSection();
-
-        // -- Bottone Elabora
-        processBtn = buildProcessButton();
-        JPanel btnWrapper = new JPanel(new FlowLayout(FlowLayout.CENTER));
-        btnWrapper.setBackground(BG);
-        btnWrapper.add(processBtn);
-        add(btnWrapper);
-
-        // -- Etichetta stato
-        statusLbl = new JLabel("In attesa di un file…", SwingConstants.CENTER);
-        statusLbl.setFont(scf("Segoe UI", Font.PLAIN, 11));
-        statusLbl.setForeground(FG_DIM);
-        statusLbl.setAlignmentX(Component.CENTER_ALIGNMENT);
-        statusLbl.setBorder(new EmptyBorder(0, sc(24), sc(18), sc(24)));
-        add(statusLbl);
-
-        // -- Drop target sul pannello
-        registerDropTarget();
-
-        pack();
-        setSize(sc(470), sc(530));
-        setLocationRelativeTo(null);
-    }
-
-    // ── Costruzione pannello drop ─────────────────────────────────────────────
-
-    private JPanel buildDropPanel() {
-        JPanel panel = new JPanel();
-        panel.setPreferredSize(new Dimension(sc(420), sc(110)));
-        panel.setBackground(BG);
-        panel.setBorder(BorderFactory.createLineBorder(ACCENT, Math.max(1, sc(2))));
-        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-
-        JLabel icon = new JLabel("📂", SwingConstants.CENTER);
-        icon.setFont(scf("Segoe UI Emoji", Font.PLAIN, 28));
-        icon.setAlignmentX(Component.CENTER_ALIGNMENT);
-        icon.setBorder(new EmptyBorder(sc(12), 0, sc(4), 0));
-        panel.add(icon);
-
-        JLabel hint = new JLabel("Trascina qui il file Excel (.xlsx / .xls)", SwingConstants.CENTER);
-        hint.setFont(scf("Segoe UI", Font.PLAIN, 11));
-        hint.setForeground(FG_DIM);
-        hint.setAlignmentX(Component.CENTER_ALIGNMENT);
-        panel.add(hint);
-
-        JLabel hint2 = new JLabel("oppure clicca per sfogliare", SwingConstants.CENTER);
-        hint2.setFont(scf("Segoe UI", Font.PLAIN, 10));
-        hint2.setForeground(new Color(0x94A3B8));
-        hint2.setAlignmentX(Component.CENTER_ALIGNMENT);
-        hint2.setBorder(new EmptyBorder(sc(2), 0, 0, 0));
-        panel.add(hint2);
-
-        panel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        panel.addMouseListener(new MouseAdapter() {
-            @Override
-            public void mouseClicked(MouseEvent e) { openFileChooser(); }
-            @Override
-            public void mouseEntered(MouseEvent e) {
-                panel.setBorder(BorderFactory.createLineBorder(ACCENT_DARK, Math.max(1, sc(2))));
-            }
-            @Override
-            public void mouseExited(MouseEvent e) {
-                panel.setBorder(BorderFactory.createLineBorder(ACCENT, Math.max(1, sc(2))));
-            }
-        });
-
-        return panel;
-    }
-
-    // ── Costruzione sezione colonne ───────────────────────────────────────────
-
-    private JTextArea buildColumnsSection() {
-        // Label descrittiva
-        JLabel lbl = new JLabel("Colonne da estrarre (una per riga, nell'ordine desiderato):");
-        lbl.setFont(scf("Segoe UI", Font.PLAIN, 11));
-        lbl.setForeground(FG_DIM);
-        lbl.setAlignmentX(Component.CENTER_ALIGNMENT);
-        lbl.setBorder(new EmptyBorder(sc(4), sc(24), sc(4), sc(24)));
-        add(lbl);
-
-        // Textarea
-        JTextArea area = new JTextArea(DEFAULT_COLUMNS);
-        area.setFont(scf("Segoe UI", Font.PLAIN, 12));
-        area.setForeground(new Color(0x0F172A));
-        area.setBackground(Color.WHITE);
-        area.setLineWrap(false);
-        area.setWrapStyleWord(false);
-        area.setBorder(new EmptyBorder(sc(6), sc(8), sc(6), sc(8)));
-
-        JScrollPane scroll = new JScrollPane(area);
-        scroll.setPreferredSize(new Dimension(sc(420), sc(110)));
-        scroll.setBorder(BorderFactory.createLineBorder(new Color(0xCBD5E1), Math.max(1, sc(1))));
-
-        JPanel areaWrapper = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
-        areaWrapper.setBackground(BG);
-        areaWrapper.setBorder(new EmptyBorder(0, sc(24), sc(8), sc(24)));
-        areaWrapper.add(scroll);
-        add(areaWrapper);
-
-        return area;
-    }
-
-    // ── Costruzione bottone ───────────────────────────────────────────────────
-
-    private JButton buildProcessButton() {
-        JButton btn = new JButton("Elabora") {
-            @Override
-            protected void paintComponent(Graphics g) {
-                Graphics2D g2d = (Graphics2D) g;
-
-                // Imposta rendering hints prima di super.paintComponent()
-                // così anche il testo del bottone beneficia di AA e LCD.
-                applyHints(g2d);
-
-                // Sfondo con angoli arrotondati scalati
-                Graphics2D g2bg = (Graphics2D) g.create();
-                applyHints(g2bg);
-                if (isEnabled()) {
-                    g2bg.setColor(getModel().isPressed() ? ACCENT_DARK : ACCENT);
-                } else {
-                    g2bg.setColor(new Color(0xCBD5E1));
-                }
-                g2bg.fillRoundRect(0, 0, getWidth(), getHeight(), sc(8), sc(8));
-                g2bg.dispose();
-
-                super.paintComponent(g);
+    public App(){
+        super("Excel -> TXT"); setDefaultCloseOperation(EXIT_ON_CLOSE); setMinimumSize(new Dimension(sc(620),sc(650)));
+        JPanel content=new JPanel(){
+            @Override public Dimension getPreferredSize(){
+                Dimension d=super.getPreferredSize();
+                d.width=sc(658);
+                return d;
             }
         };
-        btn.setFont(scf("Segoe UI", Font.BOLD, 11));
-        btn.setForeground(Color.WHITE);
-        btn.setContentAreaFilled(false);
-        btn.setBorderPainted(false);
-        btn.setFocusPainted(false);
-        btn.setEnabled(false);
-        btn.setPreferredSize(new Dimension(sc(110), sc(30)));
-        btn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        btn.addActionListener(e -> onProcess());
-        return btn;
+        content.setLayout(new BoxLayout(content,BoxLayout.Y_AXIS)); content.setBackground(BG);
+        content.setBorder(new EmptyBorder(sc(18),sc(24),sc(20),sc(24)));
+        JLabel title=label("Excel -> TXT",22,Font.BOLD,ACCENT_DARK); title.setAlignmentX(CENTER_ALIGNMENT); content.add(title); content.add(vgap(12));
+        content.add(sectionTitle("Documento principale")); content.add(vgap(6));
+        mainDropPanel=new DropPanel("Trascina qui il file Excel principale (.xlsx / .xls)","oppure clicca per sfogliare",true);
+        content.add(mainDropPanel); content.add(vgap(10));
+        columnsArea=addArea(content,"Colonne principali da estrarre (una per riga, nell'ordine desiderato):",DEFAULT_COLUMNS,105);
+        content.add(vgap(10)); content.add(buildJoinPanel()); content.add(vgap(12));
+        processBtn=button("Elabora"); processBtn.setEnabled(false); processBtn.setAlignmentX(CENTER_ALIGNMENT); processBtn.addActionListener(e->onProcess()); content.add(processBtn); content.add(vgap(9));
+        statusPane=new JTextPane();
+        statusPane.setEditable(false);
+        statusPane.setContentType("text/html");
+        statusPane.setFont(font(Font.PLAIN,12));
+        statusPane.setBackground(Color.WHITE);
+        statusPane.setBorder(new EmptyBorder(sc(7),sc(9),sc(7),sc(9)));
+
+        statusScroll=new JScrollPane(statusPane);
+        statusScroll.setAlignmentX(CENTER_ALIGNMENT);
+        statusScroll.setPreferredSize(new Dimension(sc(FORM_WIDTH),sc(125)));
+        statusScroll.setMinimumSize(new Dimension(sc(FORM_WIDTH),sc(125)));
+        statusScroll.setMaximumSize(new Dimension(sc(FORM_WIDTH),sc(125)));
+        statusScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        statusScroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        statusScroll.getVerticalScrollBar().setUnitIncrement(sc(16));
+        statusScroll.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(BORDER),"Stato e warning",
+                TitledBorder.LEFT,TitledBorder.TOP,font(Font.BOLD,12),new Color(0x0F172A)));
+        setStatus("In attesa del documento principale...",FG);
+        content.add(statusScroll);
+        content.setMaximumSize(new Dimension(sc(658), Integer.MAX_VALUE));
+
+        JPanel centered = new JPanel(new GridBagLayout());
+        centered.setBackground(BG);
+        GridBagConstraints gbc=new GridBagConstraints();
+        gbc.gridx=0; gbc.gridy=0; gbc.weightx=1.0; gbc.weighty=1.0;
+        gbc.anchor=GridBagConstraints.NORTH; gbc.fill=GridBagConstraints.NONE;
+        centered.add(content,gbc);
+
+        JScrollPane scroll=new JScrollPane(centered);
+        scroll.setBorder(null);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        scroll.setVerticalScrollBarPolicy(ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scroll.getVerticalScrollBar().setUnitIncrement(sc(18));
+        scroll.getViewport().setBackground(BG);
+        setContentPane(scroll);
+        setSize(sc(690),Math.min(sc(900),GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds().height)); setLocationRelativeTo(null);
     }
+    private JPanel buildJoinPanel(){
+        JPanel body=new JPanel();
+        body.setLayout(new BoxLayout(body,BoxLayout.Y_AXIS));
+        body.setBackground(PANEL);
+        body.setBorder(new EmptyBorder(sc(10),sc(10),sc(10),sc(10)));
 
-    // ── Drag-and-drop ────────────────────────────────────────────────────────
+        JLabel optional=label("Opzionale: senza documento secondario l'app continua a funzionare come prima.",12,Font.PLAIN,FG);
+        optional.setAlignmentX(LEFT_ALIGNMENT);
+        optional.setPreferredSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(22)));
+        optional.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(22)));
+        body.add(optional); body.add(vgap(8));
 
-    private void registerDropTarget() {
-        new DropTarget(dropPanel, new DropTargetAdapter() {
-            @Override
-            public void dragEnter(DropTargetDragEvent dtde) {
-                dropPanel.setBorder(BorderFactory.createLineBorder(ACCENT_DARK, Math.max(1, sc(3))));
-            }
-            @Override
-            public void dragExit(DropTargetEvent dte) {
-                dropPanel.setBorder(BorderFactory.createLineBorder(ACCENT, Math.max(1, sc(2))));
-            }
-            @Override
-            public void drop(DropTargetDropEvent dtde) {
-                dropPanel.setBorder(BorderFactory.createLineBorder(ACCENT, Math.max(1, sc(2))));
-                try {
-                    dtde.acceptDrop(DnDConstants.ACTION_COPY);
-                    @SuppressWarnings("unchecked")
-                    List<File> files = (List<File>)
-                            dtde.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
-                    if (!files.isEmpty()) handleFile(files.get(0));
-                    dtde.dropComplete(true);
-                } catch (Exception ex) {
-                    dtde.dropComplete(false);
-                    setStatus("❌ Errore nel drop: " + ex.getMessage(), ERROR);
-                }
-            }
-        });
+        secondaryDropPanel=new DropPanel("Trascina qui il documento secondario per la join","ad esempio: sys_user.xlsx",false);
+        secondaryDropPanel.setPreferredSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(100)));
+        secondaryDropPanel.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(100)));
+        secondaryDropPanel.setAlignmentX(LEFT_ALIGNMENT);
+        body.add(secondaryDropPanel); body.add(vgap(9));
+
+        JPanel keys=new JPanel(new GridLayout(1,2,sc(10),0));
+        keys.setOpaque(false); keys.setAlignmentX(LEFT_ALIGNMENT);
+        keys.setPreferredSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(108)));
+        keys.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(108)));
+        JPanel left=areaPanel("Chiavi nel documento principale:",DEFAULT_MAIN_KEYS,82);
+        JPanel right=areaPanel("Chiavi nel documento secondario:",DEFAULT_SECONDARY_KEYS,82);
+        mainKeysArea=(JTextArea)((JScrollPane)left.getComponent(2)).getViewport().getView();
+        secondaryKeysArea=(JTextArea)((JScrollPane)right.getComponent(2)).getViewport().getView();
+        keys.add(left); keys.add(right); body.add(keys); body.add(vgap(9));
+
+        JPanel output=areaPanel("Colonne del documento secondario da aggiungere all'output:",DEFAULT_JOIN_OUTPUT,92);
+        output.setAlignmentX(LEFT_ALIGNMENT);
+        output.setPreferredSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(118)));
+        output.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(118)));
+        JScrollPane outputScroll=(JScrollPane)output.getComponent(2);
+        outputScroll.setPreferredSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(92)));
+        outputScroll.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(92)));
+        joinOutputArea=(JTextArea)outputScroll.getViewport().getView();
+        body.add(output); body.add(vgap(7));
+
+        fallbackCheckBox=new JCheckBox("Abilita join con fallback sull'ultima chiave",true);
+        fallbackCheckBox.setOpaque(false); fallbackCheckBox.setFont(font(Font.PLAIN,12)); fallbackCheckBox.setForeground(FG);
+        fallbackCheckBox.setAlignmentX(LEFT_ALIGNMENT);
+        fallbackCheckBox.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(28)));
+        fallbackCheckBox.setToolTipText("Se la join completa fallisce, riprova senza l'ultima chiave, solo se la corrispondenza resta univoca.");
+        body.add(fallbackCheckBox);
+
+        JLabel help=label("<html>Le chiavi sono accoppiate riga per riga. Il fallback ignora soltanto l'ultima chiave<br>e solo in assenza di ambiguita.</html>",11,Font.PLAIN,FG);
+        help.setAlignmentX(LEFT_ALIGNMENT); help.setMaximumSize(new Dimension(sc(JOIN_INNER_WIDTH),sc(38)));
+        body.add(help); body.add(vgap(7));
+
+        JButton clear=new JButton("Rimuovi documento secondario");
+        clear.setFont(font(Font.PLAIN,11)); clear.setAlignmentX(LEFT_ALIGNMENT);
+        clear.addActionListener(e->clearSecondaryFile()); body.add(clear);
+
+        JPanel wrapper=new JPanel(new BorderLayout());
+        wrapper.setBackground(BG);
+        wrapper.setBorder(BorderFactory.createTitledBorder(BorderFactory.createLineBorder(BORDER),"Join con documento secondario",TitledBorder.LEFT,TitledBorder.TOP,font(Font.BOLD,13),new Color(0x0F172A)));
+        wrapper.add(body,BorderLayout.CENTER);
+        wrapper.setAlignmentX(CENTER_ALIGNMENT);
+        wrapper.setPreferredSize(new Dimension(sc(FORM_WIDTH),sc(470)));
+        wrapper.setMaximumSize(new Dimension(sc(FORM_WIDTH),sc(470)));
+        return wrapper;
     }
+    private JTextArea addArea(JPanel parent,String text,String value,int h){ JPanel p=areaPanel(text,value,h); parent.add(p); return (JTextArea)((JScrollPane)p.getComponent(2)).getViewport().getView(); }
+    private JPanel areaPanel(String text,String value,int h){ JPanel p=new JPanel(); p.setLayout(new BoxLayout(p,BoxLayout.Y_AXIS)); p.setOpaque(false); p.setAlignmentX(CENTER_ALIGNMENT); p.setPreferredSize(new Dimension(sc(FORM_WIDTH),sc(h+26))); p.setMaximumSize(new Dimension(sc(FORM_WIDTH),sc(h+26))); JLabel l=label(text,12,Font.PLAIN,FG); l.setAlignmentX(LEFT_ALIGNMENT); p.add(l); p.add(vgap(4)); JTextArea a=new JTextArea(value); a.setFont(font(Font.PLAIN,13)); a.setLineWrap(false); a.setBorder(new EmptyBorder(sc(6),sc(8),sc(6),sc(8))); JScrollPane s=new JScrollPane(a); s.setPreferredSize(new Dimension(sc(FORM_WIDTH),sc(h))); s.setMaximumSize(new Dimension(sc(FORM_WIDTH),sc(h))); s.setBorder(BorderFactory.createLineBorder(BORDER)); s.setAlignmentX(LEFT_ALIGNMENT); p.add(s); return p; }
+    private JLabel sectionTitle(String s){ JLabel l=label(s,15,Font.BOLD,new Color(0x0F172A)); l.setAlignmentX(CENTER_ALIGNMENT); l.setPreferredSize(new Dimension(sc(FORM_WIDTH),sc(22))); l.setMaximumSize(new Dimension(sc(FORM_WIDTH),sc(22))); return l; }
+    private static JLabel label(String s,int size,int style,Color c){ JLabel l=new JLabel(s); l.setFont(font(style,size)); l.setForeground(c); return l; }
+    private static Component vgap(int n){ return Box.createRigidArea(new Dimension(1,sc(n))); }
+    private JButton button(String text){
+        JButton b=new JButton(text){
+            @Override protected void paintComponent(Graphics g){
+                Graphics2D bg=(Graphics2D)g.create();
+                bg.setRenderingHint(RenderingHints.KEY_ANTIALIASING,RenderingHints.VALUE_ANTIALIAS_ON);
+                Color fill;
+                if(!isEnabled()) fill=new Color(0xCBD5E1);
+                else if(getModel().isPressed()) fill=ACCENT_DARK;
+                else if(getModel().isRollover()) fill=new Color(0x2563EB);
+                else fill=ACCENT;
+                bg.setColor(fill);
+                bg.fillRoundRect(0,0,getWidth(),getHeight(),sc(8),sc(8));
+                bg.dispose();
 
-    // ── File chooser (click) ──────────────────────────────────────────────────
-
-    private void openFileChooser() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("Seleziona file Excel");
-        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
-                "File Excel (*.xlsx, *.xls)", "xlsx", "xls"
-        ));
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            handleFile(chooser.getSelectedFile());
-        }
-    }
-
-    // ── Gestione file selezionato ─────────────────────────────────────────────
-
-    private void handleFile(File file) {
-        String name = file.getName().toLowerCase();
-        if (!name.endsWith(".xlsx") && !name.endsWith(".xls")) {
-            setStatus("❌ File non supportato. Trascina un file .xlsx o .xls", ERROR);
-            currentFile = null;
-            processBtn.setEnabled(false);
-            return;
-        }
-        currentFile = file.getAbsolutePath();
-        setStatus("📄 Selezionato: " + file.getName() + "\nPronto per l'elaborazione.", FG_DIM);
-        processBtn.setEnabled(true);
-    }
-
-    // ── Legge le colonne dalla textarea ──────────────────────────────────────
-
-    private List<String> parseColumns() {
-        List<String> cols = new ArrayList<>();
-        for (String line : columnsArea.getText().split("\n")) {
-            String trimmed = line.trim();
-            if (!trimmed.isEmpty()) cols.add(trimmed);
-        }
-        return cols;
-    }
-
-    // ── Elaborazione ─────────────────────────────────────────────────────────
-
-    private void onProcess() {
-        if (currentFile == null) return;
-
-        List<String> columns = parseColumns();
-        if (columns.isEmpty()) {
-            setStatus("❌ Inserisci almeno un nome colonna.", ERROR);
-            return;
-        }
-
-        setStatus("⏳ Elaborazione in corso…", FG_DIM);
-        processBtn.setEnabled(false);
-
-        final String filePath = currentFile;
-
-        SwingWorker<String, Void> worker = new SwingWorker<String, Void>() {
-            @Override
-            protected String doInBackground() throws Exception {
-                String content = Logic.processExcel(filePath, columns);
-                return Logic.saveOutput(filePath, content);
-            }
-            @Override
-            protected void done() {
-                try {
-                    String outPath = get();
-                    setStatus("✅ File salvato:\n" + outPath, SUCCESS);
-                } catch (Exception ex) {
-                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    setStatus("❌ Errore:\n" + cause.getMessage(), ERROR);
-                } finally {
-                    currentFile = null;
-                }
+                Graphics2D textGraphics=(Graphics2D)g.create();
+                textGraphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,RenderingHints.VALUE_TEXT_ANTIALIAS_LCD_HRGB);
+                super.paintComponent(textGraphics);
+                textGraphics.dispose();
             }
         };
-        worker.execute();
+        b.setFont(font(Font.BOLD,11));
+        b.setForeground(Color.WHITE);
+        b.setContentAreaFilled(false);
+        b.setOpaque(false);
+        b.setBorderPainted(false);
+        b.setFocusPainted(false);
+        b.setRolloverEnabled(true);
+        b.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        b.setPreferredSize(new Dimension(sc(110),sc(30)));
+        b.setMaximumSize(new Dimension(sc(110),sc(30)));
+        return b;
     }
-
-    // ── Aggiorna etichetta di stato ───────────────────────────────────────────
-
-    private void setStatus(String msg, Color color) {
-        String html = "<html><center>" + msg.replace("\n", "<br>") + "</center></html>";
-        statusLbl.setText(html);
-        statusLbl.setForeground(color);
+    private boolean validExcel(File f){ String n=f.getName().toLowerCase(Locale.ROOT); return n.endsWith(".xlsx")||n.endsWith(".xls"); }
+    private void choose(boolean main){ JFileChooser c=new JFileChooser(); c.setDialogTitle("Seleziona file Excel"); c.setFileFilter(new FileNameExtensionFilter("File Excel (*.xlsx, *.xls)","xlsx","xls")); if(c.showOpenDialog(this)==JFileChooser.APPROVE_OPTION){ if(main) handleMain(c.getSelectedFile()); else handleSecondary(c.getSelectedFile()); } }
+    private void handleMain(File f){ if(!validExcel(f)){currentFile=null;processBtn.setEnabled(false);setStatus("File principale non supportato. Usa .xlsx o .xls",ERROR);return;} currentFile=f.getAbsolutePath();mainDropPanel.update("Selezionato: "+f.getName(),"Documento principale pronto");processBtn.setEnabled(true);setStatus("Documento principale pronto.",FG); }
+    private void handleSecondary(File f){ if(!validExcel(f)){secondaryFile=null;setStatus("Documento secondario non supportato. Usa .xlsx o .xls",ERROR);return;} secondaryFile=f.getAbsolutePath();secondaryDropPanel.update("Selezionato: "+f.getName(),"Join attiva");setStatus("Documento secondario pronto: la join verra applicata.",FG); }
+    private void clearSecondaryFile(){secondaryFile=null;secondaryDropPanel.update("Trascina qui il documento secondario per la join","ad esempio: sys_user.xlsx");setStatus("Documento secondario rimosso. Elaborazione standard attiva.",FG);}
+    private List<String> lines(JTextArea a){List<String> r=new ArrayList<String>();for(String s:a.getText().split("\\R")){s=s.trim();if(!s.isEmpty())r.add(s);}return r;}
+    private void onProcess(){
+        if(currentFile==null)return; final List<String> cols=lines(columnsArea); if(cols.isEmpty()){setStatus("Inserisci almeno una colonna principale.",ERROR);return;}
+        final String main=currentFile,second=secondaryFile; final List<String> mk=lines(mainKeysArea),sk=lines(secondaryKeysArea),out=lines(joinOutputArea); final boolean fb=fallbackCheckBox.isSelected();
+        processBtn.setEnabled(false); setStatus("Elaborazione in corso...",FG);
+        SwingWorker<Result,Void> w=new SwingWorker<Result,Void>(){protected Result doInBackground()throws Exception{String txt=Logic.processExcel(main,cols,second,mk,sk,out,fb);String warn=Logic.consumeWarnings();return new Result(Logic.saveOutput(main,txt),warn);}protected void done(){try{Result r=get();if(r.warning.isEmpty())setStatus("File salvato:<br>"+esc(r.path),SUCCESS);else setStatus("File salvato correttamente:<br>"+esc(r.path)+"<br><br>"+esc(r.warning).replace("\n","<br>"),WARNING);}catch(InterruptedException ex){Thread.currentThread().interrupt();setStatus("Elaborazione interrotta.",ERROR);}catch(ExecutionException ex){Throwable c=ex.getCause();while(c!=null&&c.getCause()!=null)c=c.getCause();setStatus("Errore:<br>"+esc(c==null?"sconosciuto":c.getMessage()),ERROR);}finally{processBtn.setEnabled(true);}}}; w.execute();
+    }
+    private static String esc(String s){return s==null?"":s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;");}
+    private void setStatus(String msg,Color c){
+        String hex=String.format("#%02x%02x%02x",c.getRed(),c.getGreen(),c.getBlue());
+        statusPane.setText("<html><body style='margin:0;font-family:Segoe UI;font-size:"+sc(12)
+                +"pt;color:"+hex+";'>"+msg.replace("\n","<br>")+"</body></html>");
+        statusPane.setCaretPosition(0);
+        statusPane.revalidate();
+        statusPane.repaint();
+        if(statusScroll!=null){
+            statusScroll.getVerticalScrollBar().setValue(0);
+            statusScroll.revalidate();
+            statusScroll.repaint();
+        }
+    }
+    private static final class Result{final String path,warning;Result(String p,String w){path=p;warning=w;}}
+    private final class DropPanel extends JPanel{
+        private final JLabel first,second; private final boolean main;
+        DropPanel(String a,String b,boolean m){main=m;setLayout(new BoxLayout(this,BoxLayout.Y_AXIS));setBackground(BG);setBorder(BorderFactory.createLineBorder(ACCENT,sc(2)));setPreferredSize(new Dimension(sc(610),sc(m?118:100)));setMaximumSize(new Dimension(sc(610),sc(m?118:100)));setAlignmentX(CENTER_ALIGNMENT);setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));add(Box.createVerticalGlue());JLabel icon=label("FILE",15,Font.BOLD,ACCENT_DARK);icon.setAlignmentX(CENTER_ALIGNMENT);add(icon);first=label(a,14,Font.PLAIN,FG);first.setAlignmentX(CENTER_ALIGNMENT);add(first);second=label(b,12,Font.PLAIN,new Color(0x94A3B8));second.setAlignmentX(CENTER_ALIGNMENT);add(second);add(Box.createVerticalGlue());addMouseListener(new MouseAdapter(){public void mouseClicked(MouseEvent e){choose(main);}public void mouseEntered(MouseEvent e){setBorder(BorderFactory.createLineBorder(ACCENT_DARK,sc(2)));}public void mouseExited(MouseEvent e){setBorder(BorderFactory.createLineBorder(ACCENT,sc(2)));}});new DropTarget(this,new DropTargetAdapter(){public void drop(DropTargetDropEvent e){try{e.acceptDrop(DnDConstants.ACTION_COPY);@SuppressWarnings("unchecked") List<File> fs=(List<File>)e.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);if(!fs.isEmpty()){if(main)handleMain(fs.get(0));else handleSecondary(fs.get(0));}e.dropComplete(true);}catch(Exception x){e.dropComplete(false);App.this.setStatus("Errore nel trascinamento: "+esc(x.getMessage()),App.ERROR);}}});}
+        void update(String a,String b){first.setText(a);second.setText(b);}
     }
 }

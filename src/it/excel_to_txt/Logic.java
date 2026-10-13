@@ -1,124 +1,42 @@
 package it.excel_to_txt;
 
 import org.apache.poi.ss.usermodel.*;
-import org.apache.poi.xssf.usermodel.XSSFWorkbook;
-import org.apache.poi.hssf.usermodel.HSSFWorkbook;
-
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/**
- * Logic.java
- * ----------
- * Logica di elaborazione: lettura Excel e scrittura file di testo.
- * Viene sempre elaborato il primo foglio del workbook, cioe quello
- * visualizzato piu a sinistra in Excel.
- * Le colonne da estrarre sono passate come lista ordinata dall'esterno.
- */
-public class Logic {
-
-    // -- Legge una cella come stringa -----------------------------------------
-    private static String cellStr(Cell cell) {
-        if (cell == null) return "";
-        DataFormatter fmt = new DataFormatter();
-        return fmt.formatCellValue(cell).trim();
-    }
-
-    // -- Elabora il file Excel e restituisce il testo formattato --------------
-    //    columns: lista ordinata dei nomi colonna da estrarre
-    public static String processExcel(String path, List<String> columns) throws IOException {
-        path = path.trim();
-        File file = new File(path);
-
-        try (InputStream is = new FileInputStream(file);
-             Workbook wb = path.toLowerCase().endsWith(".xlsx")
-                     ? new XSSFWorkbook(is)
-                     : new HSSFWorkbook(is)) {
-
-            // Il foglio con indice 0 e sempre il primo foglio sulla sinistra.
-            Sheet sheet = wb.getSheetAt(0);
-
-            // Prima riga = intestazioni
-            Row headerRow = sheet.getRow(0);
-            if (headerRow == null) {
-                throw new IllegalArgumentException("Il foglio e vuoto.");
-            }
-
-            // Mappa nome colonna -> indice fisico
-            Map<String, Integer> colIndex = new LinkedHashMap<>();
-            for (int c = 0; c <= headerRow.getLastCellNum(); c++) {
-                Cell hCell = headerRow.getCell(c);
-                if (hCell != null) {
-                    String name = cellStr(hCell);
-                    colIndex.put(name, c);
-                }
-            }
-
-            // Verifica che tutte le colonne richieste esistano
-            List<String> missing = new ArrayList<>();
-            for (String col : columns) {
-                if (!colIndex.containsKey(col)) missing.add(col);
-            }
-
-            if (!missing.isEmpty()) {
-                throw new IllegalArgumentException(
-                        "Colonne mancanti nel primo foglio: " + missing
-                );
-            }
-
-            // Costruisce i blocchi rispettando l'ordine delle colonne indicate
-            List<String> blocks = new ArrayList<>();
-            for (int r = 1; r <= sheet.getLastRowNum(); r++) {
-                Row row = sheet.getRow(r);
-                if (row == null) continue;
-
-                // Raccoglie i valori nell'ordine richiesto
-                List<String> values = new ArrayList<>();
-                boolean allEmpty = true;
-                for (String col : columns) {
-                    String val = cellStr(row.getCell(colIndex.get(col)));
-                    values.add(val);
-                    if (!val.isEmpty()) allEmpty = false;
-                }
-
-                // Salta righe completamente vuote
-                if (allEmpty) continue;
-
-                // Concatena i valori separati da doppio a capo
-                StringBuilder block = new StringBuilder();
-                for (int i = 0; i < values.size(); i++) {
-                    block.append(values.get(i));
-                    if (i < values.size() - 1) block.append("\n\n");
-                }
-                block.append("\n");
-                blocks.add(block.toString());
-            }
-
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < blocks.size(); i++) {
-                sb.append(blocks.get(i));
-                sb.append("\n---\n");
-                if (i < blocks.size() - 1) sb.append("\n");
-            }
-            return sb.toString();
+/** Logica di lettura Excel, join opzionale e scrittura TXT. */
+public final class Logic {
+    private Logic() { }
+    private static final DataFormatter FORMATTER = new DataFormatter();
+    private static final String KEY_SEPARATOR = "\u001F";
+    private static final ThreadLocal<List<String>> WARNINGS = new ThreadLocal<List<String>>() { protected List<String> initialValue(){return new ArrayList<String>();} };
+    private static String cellStr(Cell c){return c==null?"":FORMATTER.formatCellValue(c).trim();}
+    public static String processExcel(String path,List<String> columns)throws IOException{return processExcel(path,columns,null,Collections.<String>emptyList(),Collections.<String>emptyList(),Collections.<String>emptyList(),false);}
+    public static String processExcel(String path,List<String> columns,String secondaryPath,List<String> mainKeys,List<String> secondaryKeys,List<String> secondaryOutput,boolean fallback)throws IOException{
+        WARNINGS.get().clear(); validate(secondaryPath,mainKeys,secondaryKeys,secondaryOutput); boolean join=secondaryPath!=null&&!secondaryPath.trim().isEmpty(); SecondaryIndexes indexes=join?buildIndexes(secondaryPath.trim(),secondaryKeys,secondaryOutput,fallback):null;
+        try(InputStream in=new FileInputStream(new File(path.trim()));Workbook wb=WorkbookFactory.create(in)){
+            Sheet sheet=firstSheet(wb); Row header=requireHeader(sheet,"documento principale"); Map<String,Integer> idx=headerIndex(header); List<String> req=new ArrayList<String>(columns);if(join)req.addAll(mainKeys);requireColumns(idx,req,"documento principale");List<String> blocks=new ArrayList<String>();
+            for(int r=1;r<=sheet.getLastRowNum();r++){Row row=sheet.getRow(r);if(row==null)continue;List<String> values=readValues(row,idx,columns);boolean empty=true;for(String v:values)if(!v.isEmpty()){empty=false;break;}if(empty)continue;if(join){JoinMatch match=findMatch(row,r+1,idx,mainKeys,indexes);if(match==null){for(int i=0;i<secondaryOutput.size();i++)values.add("");}else{if(match.note!=null)values.add(match.note);values.addAll(match.values);}}blocks.add(formatBlock(values,columns.size(),join));}return formatDocument(blocks);
         }
     }
-
-    // -- Salva il file di output ---------------------------------------------
-    public static String saveOutput(String excelPath, String content) throws IOException {
-        String base = excelPath.replaceAll("\\.[^.]+$", "");
-        File outFile = new File(base + "_output.txt");
-
-        // Fallback: stessa cartella dello script se non scrivibile
-        if (!outFile.getParentFile().canWrite()) {
-            outFile = new File(System.getProperty("user.dir"),
-                    new File(base).getName() + "_output.txt");
-        }
-
-        try (OutputStreamWriter w = new OutputStreamWriter(
-                new FileOutputStream(outFile), "UTF-8")) {
-            w.write(content);
-        }
-        return outFile.getAbsolutePath();
+    private static void validate(String path,List<String> a,List<String>b,List<String>out){if(path==null||path.trim().isEmpty())return;if(a.isEmpty()||b.isEmpty())throw new IllegalArgumentException("Per la join indica almeno una colonna chiave per entrambi i documenti.");if(a.size()!=b.size())throw new IllegalArgumentException("Le chiavi di join devono essere in coppia: stesso numero di righe nel documento principale e secondario.");if(out.isEmpty())throw new IllegalArgumentException("Indica almeno una colonna del documento secondario da aggiungere all'output.");}
+    private static SecondaryIndexes buildIndexes(String path,List<String> keys,List<String> outputs,boolean fallback)throws IOException{
+        try(InputStream in=new FileInputStream(new File(path));Workbook wb=WorkbookFactory.create(in)){Sheet sheet=firstSheet(wb);Row h=requireHeader(sheet,"documento secondario");Map<String,Integer>idx=headerIndex(h);List<String> req=new ArrayList<String>(keys);req.addAll(outputs);requireColumns(idx,req,"documento secondario");SecondaryIndexes x=new SecondaryIndexes(fallback&&keys.size()>=3);Map<String,Integer> source=new HashMap<String,Integer>();
+            for(int r=1;r<=sheet.getLastRowNum();r++){Row row=sheet.getRow(r);if(row==null)continue;List<String> vals=readValues(row,idx,outputs);String exact=key(row,idx,keys);if(!exact.isEmpty()){if(x.exact.containsKey(exact))WARNINGS.get().add("Documento secondario, riga "+(r+1)+" ignorata: chiave completa duplicata della riga "+source.get(exact)+". Mantenuto il primo record dall'alto.");else{x.exact.put(exact,vals);source.put(exact,r+1);}}if(x.fallbackEnabled){String fk=key(row,idx,keys.subList(0,keys.size()-1));if(!fk.isEmpty()){if(x.fallback.containsKey(fk)){x.ambiguous.add(fk);x.fallback.remove(fk);}else if(!x.ambiguous.contains(fk))x.fallback.put(fk,vals);}}}return x;}
     }
+    private static JoinMatch findMatch(Row row,int rowNo,Map<String,Integer>idx,List<String>keys,SecondaryIndexes x){String exact=key(row,idx,keys);List<String> vals=exact.isEmpty()?null:x.exact.get(exact);if(vals!=null)return new JoinMatch(vals,null);if(!x.fallbackEnabled)return null;String fk=key(row,idx,keys.subList(0,keys.size()-1));if(fk.isEmpty())return null;if(x.ambiguous.contains(fk)){WARNINGS.get().add("Documento principale, riga "+rowNo+": fallback non applicato perche le chiavi residue non identificano un solo record nel documento secondario.");return null;}vals=x.fallback.get(fk);if(vals!=null){String ignored=keys.get(keys.size()-1);WARNINGS.get().add("Documento principale, riga "+rowNo+": join risolta con fallback ignorando la chiave '"+ignored+"'.");return new JoinMatch(vals,"[NOTA JOIN] Dati ottenuti tramite fallback: corrispondenza trovata senza considerare la chiave '"+ignored+"'.");}return null;}
+    private static Sheet firstSheet(Workbook wb){if(wb.getNumberOfSheets()==0)throw new IllegalArgumentException("Il file Excel non contiene fogli.");return wb.getSheetAt(0);}
+    private static Row requireHeader(Sheet s,String l){Row h=s.getRow(0);if(h==null)throw new IllegalArgumentException("Il primo foglio del "+l+" e vuoto.");return h;}
+    private static Map<String,Integer> headerIndex(Row h){Map<String,Integer>m=new LinkedHashMap<String,Integer>();int last=Math.max(0,h.getLastCellNum());for(int c=0;c<last;c++){String n=cellStr(h.getCell(c));if(!n.isEmpty())m.put(n,c);}return m;}
+    private static void requireColumns(Map<String,Integer>idx,List<String>requested,String label){List<String>miss=new ArrayList<String>();for(String c:requested)if(!idx.containsKey(c)&&!miss.contains(c))miss.add(c);if(!miss.isEmpty())throw new IllegalArgumentException("Colonne mancanti nel primo foglio del "+label+": "+miss);}
+    private static List<String> readValues(Row r,Map<String,Integer>idx,List<String>cols){List<String>v=new ArrayList<String>();for(String c:cols)v.add(cellStr(r.getCell(idx.get(c))));return v;}
+    private static String key(Row r,Map<String,Integer>idx,List<String>cols){List<String>p=new ArrayList<String>();for(String c:cols){String v=normalize(cellStr(r.getCell(idx.get(c))));if(v.isEmpty())return "";p.add(v);}return String.join(KEY_SEPARATOR,p);}
+    private static String normalize(String v){return v==null?"":v.trim().replaceAll("\\s+"," ").toLowerCase(Locale.ROOT);}
+    private static String formatBlock(List<String>v,int main,boolean join){if(!join||v.size()<=main)return String.join("\n\n",v)+"\n";StringBuilder b=new StringBuilder(String.join("\n\n",v.subList(0,main)));b.append("\n\n").append(String.join("\n",v.subList(main,v.size()))).append("\n");return b.toString();}
+    private static String formatDocument(List<String>b){StringBuilder s=new StringBuilder();for(int i=0;i<b.size();i++){s.append(b.get(i)).append("\n---\n");if(i<b.size()-1)s.append("\n");}return s.toString();}
+    public static String consumeWarnings(){List<String>w=WARNINGS.get();if(w.isEmpty())return "";StringBuilder s=new StringBuilder("Elaborazione completata con ").append(w.size()).append(" warning.");int n=Math.min(8,w.size());for(int i=0;i<n;i++)s.append("\n- ").append(w.get(i));if(w.size()>n)s.append("\n- ... e altri ").append(w.size()-n).append(" warning.");w.clear();return s.toString();}
+    public static String saveOutput(String excel,String content)throws IOException{String base=excel.replaceAll("\\.[^.]+$","");File f=new File(base+"_output.txt");File p=f.getAbsoluteFile().getParentFile();if(p!=null&&(!p.exists()||!p.canWrite()))f=new File(System.getProperty("user.dir"),new File(base).getName()+"_output.txt");try(Writer w=new OutputStreamWriter(new FileOutputStream(f),StandardCharsets.UTF_8)){w.write(content);}return f.getAbsolutePath();}
+    private static final class JoinMatch{final List<String>values;final String note;JoinMatch(List<String>v,String n){values=v;note=n;}}
+    private static final class SecondaryIndexes{final Map<String,List<String>>exact=new LinkedHashMap<String,List<String>>(),fallback=new LinkedHashMap<String,List<String>>();final Set<String>ambiguous=new HashSet<String>();final boolean fallbackEnabled;SecondaryIndexes(boolean f){fallbackEnabled=f;}}
 }
